@@ -1,0 +1,88 @@
+@host = http://localhost:5241
+
+### Login as Customer (run this first, then copy the "token" value)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "cx@shop.test", "password": "Cx123!" }
+
+### Login as Employee
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "emp@shop.test", "password": "Emp123!" }
+
+### Login as Manager
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "mgr@shop.test", "password": "Mgr123!" }
+
+### Self-register as a new Customer
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{ "email": "new@shop.test", "password": "Hello123!", "name": "New Customer" }
+
+### CX: browse active products (needs a token)
+GET {{host}}/api/products
+Authorization: Bearer PASTE_CUSTOMER_TOKEN_HERE
+
+### CX: place an order (2 notebooks)
+POST {{host}}/api/orders
+Content-Type: application/json
+Authorization: Bearer PASTE_CUSTOMER_TOKEN_HERE
+
+{ "items": [ { "productId": 1, "quantity": 2 } ] }
+
+### CX: see only my orders
+GET {{host}}/api/orders
+Authorization: Bearer PASTE_CUSTOMER_TOKEN_HERE
+
+### EMPLOYEE: see all orders
+GET {{host}}/api/orders
+Authorization: Bearer PASTE_EMPLOYEE_TOKEN_HERE
+
+### EMPLOYEE: mark order 1 as shipped (Pending/Paid/Shipped/Cancelled)
+PATCH {{host}}/api/orders/1/status
+Content-Type: application/json
+Authorization: Bearer PASTE_EMPLOYEE_TOKEN_HERE
+
+{ "status": "Shipped" }
+
+### EMPLOYEE: stock in +20 to product 2
+POST {{host}}/api/stock/movement
+Content-Type: application/json
+Authorization: Bearer PASTE_EMPLOYEE_TOKEN_HERE
+
+{ "productId": 2, "delta": 20, "note": "Delivery from supplier" }
+
+### EMPLOYEE: stock history
+GET {{host}}/api/stock/movements
+Authorization: Bearer PASTE_EMPLOYEE_TOKEN_HERE
+
+### MANAGER: create a product (CX/Employee get 403 Forbidden)
+POST {{host}}/api/products
+Content-Type: application/json
+Authorization: Bearer PASTE_MANAGER_TOKEN_HERE
+
+{ "name": "Eraser", "sku": "ER-004", "price": 1.25, "quantity": 100, "lowStockAt": 10 }
+
+### MANAGER: list users (no password hashes!)
+GET {{host}}/api/users
+Authorization: Bearer PASTE_MANAGER_TOKEN_HERE
+
+### MANAGER: change user 1 to Employee
+PATCH {{host}}/api/users/1/role
+Content-Type: application/json
+Authorization: Bearer PASTE_MANAGER_TOKEN_HERE
+
+{ "role": "Employee" }
+
+### MANAGER: low stock report (pen pack is seeded below threshold)
+GET {{host}}/api/reports/low-stock
+Authorization: Bearer PASTE_MANAGER_TOKEN_HERE
+
+### MANAGER: sales report grouped by status
+GET {{host}}/api/reports/sales
+Authorization: Bearer PASTE_MANAGER_TOKEN_HERE
