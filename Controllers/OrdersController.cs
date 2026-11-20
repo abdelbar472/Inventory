@@ -23,12 +23,15 @@ public class OrdersController : ControllerBase
     private bool IsStaff =>
         User.IsInRole(nameof(Role.Employee)) || User.IsInRole(nameof(Role.Manager));
 
-    // CUSTOMER: buy products. Stock is deducted and a history line written
-    // in the same SaveChangesAsync (EF wraps it in one DB transaction).
+    // CUSTOMER: buy products. Everything happens in ONE transaction.
+    // Stock is reduced with an atomic "UPDATE ... WHERE Quantity >= n" so two
+    // simultaneous orders can never both pass the stock check and oversell.
     [HttpPost]
     [Authorize(Roles = nameof(Role.Customer))]
     public async Task<IActionResult> Place(CreateOrderRequest request)
     {
+        await using var transaction = await _db.Database.BeginTransactionAsync();
+
         var productIds = request.Items.Select(i => i.ProductId).ToList();
         var products = await _db.Products.Where(p => productIds.Contains(p.Id)).ToListAsync();
 
@@ -39,10 +42,17 @@ public class OrdersController : ControllerBase
             var product = products.FirstOrDefault(p => p.Id == item.ProductId);
             if (product is null || !product.IsActive)
                 return BadRequest(new { message = $"Product {item.ProductId} is unavailable" });
-            if (product.Quantity < item.Quantity)
+
+            // Atomic check-and-decrement: the database only updates the row if
+            // there is still enough stock at this exact moment.
+            var updated = await _db.Products
+                .Where(p => p.Id == item.ProductId && p.Quantity >= item.Quantity)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(p => p.Quantity, p => p.Quantity - item.Quantity));
+
+            if (updated == 0)
                 return BadRequest(new { message = $"Not enough stock for {product.Name}" });
 
-            product.Quantity -= item.Quantity;                       // update stock
             order.Items.Add(new OrderItem                            // snapshot price
             {
                 ProductId = product.Id,
@@ -62,6 +72,7 @@ public class OrdersController : ControllerBase
 
         _db.Orders.Add(order);
         await _db.SaveChangesAsync();
+        await transaction.CommitAsync();
 
         AppMetrics.OrdersPlaced.Inc();   // +1 to the Prometheus counter
 

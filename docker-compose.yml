@@ -6,12 +6,14 @@ services:
     ports:
       - "5241:8080"
     environment:
-      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_HTTP_PORTS: "8080"
+      # Learning only: set to false to hide Swagger in a real deployment.
+      EnableSwagger: "true"
     networks: [monitoring]
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.5.0
     container_name: prometheus
     ports:
       - "9090:9090"
@@ -24,7 +26,7 @@ services:
     depends_on: [store-api]
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.1.0
     container_name: grafana
     ports:
       - "3000:3000"
@@ -34,7 +36,8 @@ services:
       - grafana-data:/var/lib/grafana
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Override with: $env:GRAFANA_ADMIN_PASSWORD = "something-strong"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     networks: [monitoring]
     depends_on: [prometheus]
 

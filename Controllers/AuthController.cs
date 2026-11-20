@@ -3,6 +3,7 @@ using InventoryApi.Models;
 using InventoryApi.Models.Dtos;
 using InventoryApi.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
@@ -13,6 +14,7 @@ namespace InventoryApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[EnableRateLimiting("auth")]   // 10 login/register attempts per IP per minute
 public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;

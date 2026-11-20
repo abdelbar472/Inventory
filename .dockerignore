@@ -1,7 +1,9 @@
-bin/
-obj/
+**/bin/
+**/obj/
 .git/
+.github/
 .vs/
+tests/
 *.user
 inventory.db
 inventory.db-*

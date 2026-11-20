@@ -5,5 +5,9 @@ global:
 scrape_configs:
   - job_name: store-api
     metrics_path: /metrics
+    # /metrics is protected with HTTP Basic auth in Program.cs.
+    basic_auth:
+      username: metrics
+      password: local-metrics-secret
     static_configs:
       - targets: ["store-api:8080"]

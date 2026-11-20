@@ -37,7 +37,7 @@ dotnet run
 
 - API: `http://localhost:5241`
 - Interactive docs (Swagger): `http://localhost:5241/swagger`
-- Health/metrics text: `http://localhost:5241/metrics`
+- Metrics text: `http://localhost:5241/metrics` — **protected** with HTTP Basic auth: user `metrics`, password `local-metrics-secret` (see `appsettings.json`)
 
 ### Option B — everything in Docker (API + Prometheus + Grafana)
 
@@ -48,10 +48,16 @@ docker compose up --build
 | Service | Address | What it is |
 |---|---|---|
 | Store API | `http://localhost:5241` | The application (Swagger at `/swagger`) |
-| Prometheus | `http://localhost:9090` | Collects metrics every 10 seconds |
+| Prometheus | `http://localhost:9090` | Collects metrics every 10 seconds, using Basic auth for `/metrics` |
 | Grafana | `http://localhost:3000` | Dashboards (login `admin` / `admin`) |
 
 > Run **one option at a time** — both use port 5241.
+
+Docker notes:
+- Compose runs the API in **Production** mode. Swagger is opt-in via the `EnableSwagger` setting (currently `"true"` for learning — set it to `"false"` to hide it).
+- Image tags are **pinned** (`prom/prometheus:v3.5.0`, `grafana/grafana:12.1.0`) so upgrades are deliberate, not accidental.
+- Change the Grafana password with `$env:GRAFANA_ADMIN_PASSWORD = "something-strong"` before `docker compose up`.
+- Prometheus is configured with `basic_auth` to match the protected `/metrics` endpoint.
 
 **Demo accounts** (password is the prefix + `123!`):
 
@@ -95,9 +101,14 @@ The collection includes deliberate "expect 403" requests so you can see role res
 | Authentication | JWT bearer tokens signed with HMAC-SHA256 |
 | Passwords | PBKDF2-SHA256, 100 000 iterations, per-user salt |
 | Authorization | Role claims + `[Authorize(Roles = ...)]`, plus per-record ownership checks |
-| API docs | Swagger / OpenAPI via Swashbuckle 11 |
-| Metrics | `prometheus-net` middleware + custom Counter/Gauge |
+| Request validation | Data annotations on DTOs (`[Range]`, `[EmailAddress]`, password regex) |
+| Brute-force protection | Fixed-window rate limiter: 10 auth attempts per IP per minute (HTTP 429 after that) |
+| Concurrency safety | Explicit DB transaction + atomic `UPDATE ... WHERE Quantity >= n` (no overselling) |
+| Configuration | Connection string, JWT settings, and metrics credentials read from `appsettings.json` |
+| API docs | Swagger / OpenAPI via Swashbuckle 11 (opt-in) |
+| Metrics | `prometheus-net` middleware + custom Counter/Gauge, protected by HTTP Basic auth |
 | Dashboards | Prometheus + Grafana in Docker Compose |
+| Tests / CI | xUnit tests and a GitHub Actions workflow (`dotnet build` + `dotnet test`) |
 
 ### Project layout
 
@@ -122,9 +133,13 @@ Controllers/
   UsersController.cs         manager-only user administration
   ReportsController.cs       low-stock and sales aggregation
 monitoring/
-  prometheus/prometheus.yml  Scrape config (target: store-api:8080)
+  prometheus/prometheus.yml  Scrape config (target: store-api:8080, Basic auth)
   grafana/provisioning/...   Auto-registers Prometheus datasource + dashboard
   grafana/dashboards/...     Prebuilt "Store API Metrics" dashboard
+tests/InventoryApi.Tests/   xUnit tests (PasswordHelper + DTO validation)
+.github/workflows/ci.yml    GitHub Actions: restore, build, test
+.gitignore                  Keeps bin/obj/DB files out of git
+update.sh                   Helper script to commit/push (uses git add .)
 Dockerfile, docker-compose.yml, .dockerignore
 ```
 
@@ -149,12 +164,14 @@ Dockerfile, docker-compose.yml, .dockerignore
 - One **User** has many **Orders**; one **Order** has many **OrderItems**.
 - **OrderItem.UnitPrice** copies `Product.Price` at purchase time — changing the product price later does not rewrite history.
 - Product deletion is **soft**: `PATCH .../active?active=false` sets `IsActive = false`, preserving old orders. Foreign keys use `DeleteBehavior.Restrict` so referenced rows cannot be deleted.
-- Placing an order updates product stock, writes `OrderItem` rows, writes a `StockMovement`, and saves the order in **one `SaveChangesAsync()` call** — EF wraps it in a single database transaction.
+- Placing an order runs inside **one explicit database transaction**. Stock is reduced with an atomic `UPDATE ... WHERE Quantity >= n` so two simultaneous orders cannot both pass the check and oversell; if the update affects 0 rows, the order is rejected. Stock adjustments use the same pattern and reject a zero `Delta`.
 - Money uses `decimal(18,2)`, never floating point.
 - Email and SKU have unique indexes.
 - Navigation properties use `[JsonIgnore]` to avoid cyclical JSON serialization.
 
 ### Metrics exposed at `/metrics`
+
+`/metrics` is **not public**: a middleware checks HTTP Basic credentials before the endpoint responds. Without them you get `401 Unauthorized`; Prometheus sends `metrics` / `local-metrics-secret` via `basic_auth`. The credentials come from `appsettings.json` (`Metrics:User` / `Metrics:Password`) — change both the app config and `prometheus.yml` together when deploying.
 
 | Metric | Type | Source | Grafana panel |
 |---|---|---|---|
@@ -179,14 +196,36 @@ Grafana provisioning auto-creates the datasource (`uid: prometheus`) and the das
 
 ## 5. Limitations / good next steps
 
-This is deliberately a learning project, not production-ready:
+This is deliberately a learning project, not production-ready. Several review findings have already been fixed (see the next section); these remain:
 
 1. **Database resets on every start** — `EnsureDeleted()` + `EnsureCreated()`. Learn **EF Core migrations** next to preserve data and evolve the schema safely.
-2. **JWT signing key is hard-coded in `appsettings.json`** — in production use user secrets / environment variables / a key vault, and add token expiry/refresh handling.
-3. **No order state machine** — currently any staff member can set any status. Add allowed transitions (e.g. Pending → Paid → Shipped) and restock on cancellation.
-4. **No pagination/filtering** on list endpoints.
-5. **`WeatherForecast.cs` and its controller** are leftover Visual Studio template files; safe to delete.
-6. **No automated tests yet** — a natural next exercise is unit tests for `PasswordHelper` and integration tests for role gates.
+2. **Secrets are still in `appsettings.json`** — the JWT signing key and the `/metrics` Basic credentials are dev-only defaults. In production use user secrets / environment variables / a key vault, and add token refresh handling.
+3. **No login lockout** — repeated bad passwords are rate-limited (10 attempts/IP/minute), but an account is never temporarily disabled after N failed attempts. Add failed-attempt counters and lockout windows before deploying.
+4. **No order state machine** — any staff member can set any status. Add allowed transitions (e.g. Pending → Paid → Shipped) and restock on cancellation.
+5. **No pagination/filtering** on list endpoints.
+6. **`WeatherForecast.cs` and its controller** are leftover Visual Studio template files; safe to delete.
+7. **`update.sh` still runs `git add .`** — this is now safe because `.gitignore` excludes `bin/`, `obj/`, and SQLite files, but targeted `git add <paths>` is a better habit.
+
+### Review issues that were fixed
+
+For traceability, these are the problems that were identified and addressed:
+
+| Problem | Fix |
+|---|---|
+| 88 `bin/`/`obj/`/SQLite files tracked in git | Added `.gitignore` and `git rm -r --cached bin obj inventory.db*` (files stay on disk) |
+| Overselling under concurrent orders | Explicit transaction + atomic `ExecuteUpdateAsync(... WHERE Quantity >= n)` in orders and stock movements |
+| Public `/metrics` endpoint | HTTP Basic auth middleware; Prometheus `basic_auth` scrape config |
+| Compose ran API in `Development`, exposed Swagger, used `:latest` images | Compose sets `ASPNETCORE_ENVIRONMENT=Production`; Swagger is opt-in via `EnableSwagger`; images pinned to `v3.5.0` / `12.1.0` |
+| No password policy / rate limiting / lockout | Password rules on register/create-user DTOs; 10 attempts/IP/minute rate limiter on auth endpoints (lockout still open — see above) |
+| Weak request validation | `[Range]`, `[EmailAddress]`, `[Required]`, length and regex rules on DTOs; zero stock `Delta` rejected in controller |
+| Hard-coded SQLite connection string in `Program.cs` | Moved to `ConnectionStrings:Default` in `appsettings.json` |
+| No tests / no CI | xUnit test project with 6 passing tests and `.github/workflows/ci.yml` |
+
+Run the tests locally with:
+
+```powershell
+dotnet test .\tests\InventoryApi.Tests\InventoryApi.Tests.csproj -c Release
+```
 
 ---
 
@@ -197,6 +236,8 @@ This is deliberately a learning project, not production-ready:
 | `dotnet run` says port 5241 in use | Stop the Docker stack (`docker compose down`) or the other server |
 | Grafana shows "No data" | Wait ~20s for the first scrape; check `http://localhost:9090/targets` shows `store-api` UP |
 | 401 on all endpoints | Run a Login request and check the token is pasted after `Bearer ` |
+| 401 on `/metrics` | Send HTTP Basic auth (`metrics` / `local-metrics-secret`), or use the Prometheus target instead |
+| HTTP 429 on login/register | Too many auth attempts from this IP in one minute; wait for the window to reset |
 | 403 on an action | Correct login, wrong role — see the matrix above |
 | Build error about missing packages | `dotnet restore` |
 | `CS0234` for `EntityFrameworkCore` | The EF Core SQLite package must be referenced in `.csproj` |

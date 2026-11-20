@@ -1,6 +1,7 @@
 using InventoryApi.Data;
 using InventoryApi.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
@@ -8,6 +9,7 @@ using Prometheus;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,7 +38,8 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 builder.Services.AddDbContext<AppDbContext>(opt =>
-    opt.UseSqlite("Data Source=inventory.db"));
+    opt.UseSqlite(builder.Configuration.GetConnectionString("Default")
+        ?? throw new InvalidOperationException("ConnectionStrings:Default is missing.")));
 
 // Authentication = "who are you?" (validate the JWT and read its claims)
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -59,6 +62,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // Authorization = "what are you allowed to do?" ([Authorize] checks)
 builder.Services.AddAuthorization();
 
+// Basic brute-force protection on login/register: 10 attempts per IP per minute.
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("auth", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+});
+
 // Background worker that keeps the low-stock gauge up to date.
 builder.Services.AddHostedService<LowStockMetricsWorker>();
 
@@ -73,21 +91,56 @@ using (var scope = app.Services.CreateScope())
     DbSeeder.Seed(db);
 }
 
-if (app.Environment.IsDevelopment())
+// /metrics needs HTTP Basic credentials so it is not public. Prometheus
+// sends these via basic_auth in monitoring/prometheus/prometheus.yml.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/metrics"))
+    {
+        var expectedUser = builder.Configuration["Metrics:User"];
+        var expectedPass = builder.Configuration["Metrics:Password"];
+        var header = context.Request.Headers.Authorization.ToString();
+
+        string? supplied = null;
+        if (header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                supplied = Encoding.UTF8.GetString(Convert.FromBase64String(header[6..]));
+            }
+            catch (FormatException)
+            {
+                supplied = null;   // malformed credentials are simply unauthorized
+            }
+        }
+
+        if (supplied != $"{expectedUser}:{expectedPass}")
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.Headers.WWWAuthenticate = "Basic realm=\"metrics\"";
+            return;
+        }
+    }
+    await next();
+});
+
+// Swagger is opt-in so it is not automatically exposed in Production.
+if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("EnableSwagger"))
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-// Records http_requests_total + http_request_duration_seconds automatically.
+// Records http_requests_received_total + http_request_duration_seconds automatically.
 app.UseHttpMetrics();
 
-// Order matters: authenticate first, then check permissions, then route.
+// Order matters: authenticate first, then check permissions, throttle, then route.
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.MapControllers();
 
-// Prometheus scrapes this endpoint (plain text, no auth required).
+// Prometheus scrapes this endpoint with the Basic credentials checked above.
 app.MapMetrics();
 
 app.Run();

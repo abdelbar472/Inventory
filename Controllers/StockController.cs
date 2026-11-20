@@ -22,12 +22,23 @@ public class StockController : ControllerBase
     [HttpPost("movement")]
     public async Task<IActionResult> Move(StockMovementRequest request)
     {
+        if (request.Delta == 0)
+            return BadRequest(new { message = "Delta must not be zero" });
+
+        await using var transaction = await _db.Database.BeginTransactionAsync();
+
         var product = await _db.Products.FindAsync(request.ProductId);
         if (product is null) return NotFound();
-        if (product.Quantity + request.Delta < 0)
-            return BadRequest(new { message = "Not enough stock" });
 
-        product.Quantity += request.Delta;
+        // Same atomic pattern as orders: never let stock go negative,
+        // even if two employees adjust the same product at once.
+        var updated = await _db.Products
+            .Where(p => p.Id == request.ProductId && p.Quantity + request.Delta >= 0)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.Quantity, p => p.Quantity + request.Delta));
+
+        if (updated == 0)
+            return BadRequest(new { message = "Not enough stock" });
 
         var movement = new StockMovement
         {
@@ -39,6 +50,7 @@ public class StockController : ControllerBase
         _db.StockMovements.Add(movement);
 
         await _db.SaveChangesAsync();
+        await transaction.CommitAsync();
         return Ok(movement);
     }
 

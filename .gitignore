@@ -1,0 +1,35 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.nupkg
+
+# Local SQLite database (including WAL/SHM sidecars)
+inventory.db
+inventory.db-*
+*.db
+*.db-shm
+*.db-wal
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Secrets (keep real keys out of git)
+*.secrets.json
+appsettings.*.local.json
+.env
+
+# Logs
+*.log
+logs/
